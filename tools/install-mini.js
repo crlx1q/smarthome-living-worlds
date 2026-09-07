@@ -2,7 +2,10 @@
 /*
  * tools/install-mini.js
  *
- * Idempotent installer: wires lw/living-worlds.js into "index mini.html".
+ * Idempotent installer: builds "index minia.html" - a copy of
+ * "index mini.html" with the Living Worlds background wired into it. The
+ * original plain screen is left exactly as it was, so both versions stay
+ * available side by side.
  *
  * It adds whole lines only, and nothing else:
  *   1. a <style> block before </head>              (canvas layering + panel)
@@ -18,9 +21,11 @@
  * byte for byte.
  *
  * Usage:
- *   node tools/install-mini.js "index mini.html"
- *   node tools/install-mini.js "index mini.html" --uninstall
- *   node tools/install-mini.js "index mini.html" --check
+ *   node tools/install-mini.js                          # mini -> minia
+ *   node tools/install-mini.js --sync                   # re-copy mini first
+ *   node tools/install-mini.js "index minia.html" --check
+ *   node tools/install-mini.js "index minia.html" --uninstall
+ *   node tools/install-mini.js "index mini.html" --in-place
  */
 
 'use strict'
@@ -95,6 +100,8 @@ var CANVAS_LINES = ['        ' + HB + '<canvas id="lw-canvas" width="320" height
 
 var BOOT_LINES = [
 	HB,
+	'<!-- lw/config.js is a plain settings file: profile = ace, fps = 20, ... -->',
+	'<script src="lw/config.js"></script>',
 	'<script src="lw/living-worlds.js"></script>',
 	'<script>if (window.LW) { LW.init(); }</script>',
 	HE,
@@ -212,7 +219,23 @@ function main() {
 		if (args[a].indexOf('--') === 0) flags[args[a].substring(2)] = true
 		else if (file === null) file = args[a]
 	}
-	if (!file) file = 'index mini.html'
+	var SRC_DEFAULT = 'index mini.html'
+	var OUT_DEFAULT = 'index minia.html'
+	var createdCopy = false
+
+	if (!file) file = flags['in-place'] ? SRC_DEFAULT : OUT_DEFAULT
+
+	/* Default mode never touches the original screen: "index minia.html" is a
+	 * copy of "index mini.html" plus the Living Worlds lines. --sync refreshes
+	 * that copy from the original before patching it again. */
+	if (!flags['in-place'] && file === OUT_DEFAULT) {
+		if (!fs.existsSync(SRC_DEFAULT)) fail(SRC_DEFAULT + ' not found')
+		if (!fs.existsSync(file) || flags.sync) {
+			fs.writeFileSync(file, fs.readFileSync(SRC_DEFAULT))
+			createdCopy = true
+			console.log((flags.sync ? 're-copied ' : 'created ') + file + '  <- ' + SRC_DEFAULT)
+		}
+	}
 
 	if (!fs.existsSync(file)) fail(file + ' not found')
 	var src = fs.readFileSync(file, 'utf8')
@@ -226,7 +249,7 @@ function main() {
 	}
 
 	var bak = file + '.bak'
-	if (!fs.existsSync(bak) && !wasInstalled) {
+	if (!createdCopy && !fs.existsSync(bak) && !wasInstalled) {
 		fs.writeFileSync(bak, src)
 		console.log('backup -> ' + bak)
 	}
@@ -270,6 +293,7 @@ function main() {
 	console.log('  + LW.tick(new Date())                    in updateClock()')
 	console.log('  + LW.setActive(n === 0)                  in showPage()')
 	console.log('  + LW.setWeather(weatherData)             in updateWeather()')
+	console.log('  + <script src="lw/config.js">             before </body>')
 	console.log('  + <script src="lw/living-worlds.js">      before </body>')
 	console.log('  ' + added + ' lines added, nothing else touched.')
 }
