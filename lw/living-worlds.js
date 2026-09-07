@@ -144,18 +144,37 @@
 
 	var PRESETS = {
 		off: { enabled: false },
-		ace: { enabled: true, fps: 10, scale: 3, blendShift: false, todStep: 120, sceneCheckMin: 10, speed: 1.0 },
-		low: { enabled: true, fps: 15, scale: 2, blendShift: false, todStep: 60, sceneCheckMin: 5, speed: 1.0 },
-		medium: { enabled: true, fps: 20, scale: 2, blendShift: true, todStep: 30, sceneCheckMin: 5, speed: 1.0 },
-		high: { enabled: true, fps: 30, scale: 1, blendShift: true, todStep: 15, sceneCheckMin: 5, speed: 1.0 },
+		/* still: nothing moves between light steps. Cheapest possible mode that
+		 * still tracks sunrise/sunset. No cycling, no per-frame blit. */
+		still: { enabled: true, fps: 15, scale: 3, animate: false, dirty: true, blendShift: false, todStep: 30, sceneCheckMin: 10, speed: 1.0 },
+		/* nano and ace carry numbers measured on a real Galaxy Ace GT-S5830
+		 * in Firefox 31, each held for several minutes:
+		 *   nano  ~29 fps /  6 ms   (buffer 160x120, coarser picture)
+		 *   ace   ~20 fps / 10 ms   (buffer 213x160, ~19 fps / 11 ms on the
+		 *                            heaviest scene - May Rain) */
+		nano: { enabled: true, fps: 25, scale: 4, animate: true, dirty: true, blendShift: false, todStep: 180, sceneCheckMin: 10, speed: 1.0 },
+		ace: { enabled: true, fps: 20, scale: 3, animate: true, dirty: true, blendShift: false, todStep: 120, sceneCheckMin: 10, speed: 1.0 },
+		low: { enabled: true, fps: 15, scale: 2, animate: true, dirty: true, blendShift: false, todStep: 60, sceneCheckMin: 5, speed: 1.0 },
+		medium: { enabled: true, fps: 20, scale: 2, animate: true, dirty: true, blendShift: true, todStep: 30, sceneCheckMin: 5, speed: 1.0 },
+		/* DANGER on old hardware: full 640x480 blit with no dirty rect. On a
+		 * Galaxy Ace it ran for a few seconds and the phone rebooted, so the
+		 * on-device panel does not offer it at all. Reachable only from
+		 * lw/config.js (profile = high) or ?lw=high. */
+		high: { enabled: true, fps: 30, scale: 1, animate: true, dirty: false, blendShift: true, todStep: 15, sceneCheckMin: 5, speed: 1.0 },
 	}
-	var PRESET_ORDER = ['high', 'medium', 'low', 'ace', 'off']
+	/* The watchdog walks this list left to right. It can reach 'still' but
+	 * never 'off', so the background is never silently switched off. */
+	var PRESET_ORDER = ['high', 'medium', 'low', 'ace', 'nano', 'still', 'off']
+	/* What the on-device panel offers. 'high' is deliberately missing here. */
+	var PANEL_ORDER = ['off', 'still', 'nano', 'ace', 'low', 'medium']
 
 	var Q = {
-		preset: 'low',
+		preset: 'ace', // measured best stability/looks trade-off on a real Ace
 		enabled: true,
-		fps: 15, // user asked to start around 15
-		scale: 2, // 1 = 640x480, 2 = 320x240, 3 = 213x160 backing store
+		fps: 20, // 20 is what the device actually sustains at scale 3
+		scale: 3, // backing store = floor(640/scale) x floor(480/scale), 1..8
+		animate: true, // false = light-only mode, no palette cycling at all
+		dirty: true, // blit only the bounding box of the animated pixels
 		blendShift: false, // smooth cycling; costs ~1 extra pass over each cycle
 		todStep: 60, // seconds of simulated-clock granularity => full redraws/min
 		speed: 1.0, // Palette speedAdjust
@@ -166,12 +185,14 @@
 		focusY: 0.5,
 		octSplitDay: 16, // day-of-month boundary for early/late October
 		watchdog: true,
+		uiFps: 6, // fps cap while the quality panel is open, so it can scroll
+		fsOnTap: false, // ?lwfs=1 : the first tap anywhere requests fullscreen
 		debug: false,
 		base: 'lw/',
 	}
 
 	var STORE_KEY = 'lw.quality.v1'
-	var TUNABLE = 'enabled fps scale blendShift todStep speed sceneCheckMin initDelay fit focusX focusY octSplitDay watchdog debug preset'.split(' ')
+	var TUNABLE = 'enabled fps scale animate dirty blendShift todStep speed sceneCheckMin initDelay fit focusX focusY octSplitDay watchdog uiFps fsOnTap debug preset'.split(' ')
 
 	function applyPreset(name) {
 		var p = PRESETS[name]
@@ -181,9 +202,116 @@
 		return true
 	}
 
+	/* -------------------------------------------------------------------
+	 * lw/config.js support. window.LW_CONFIG is either a settings string
+	 *   'profile = ace\nfps = 20'    (one "key = value" per line)
+	 * or a plain object { profile: 'ace', fps: 20 }. The aliases below keep
+	 * that file readable for a human; unknown keys are ignored instead of
+	 * throwing, so a typo can never take the background down.
+	 * ----------------------------------------------------------------- */
+	var ALIAS = {
+		profile: 'preset',
+		preset: 'preset',
+		fps: 'fps',
+		pixels: 'scale',
+		scale: 'scale',
+		div: 'scale',
+		divider: 'scale',
+		light: 'todStep',
+		todstep: 'todStep',
+		blit: 'dirty',
+		dirty: 'dirty',
+		anim: 'animate',
+		animate: 'animate',
+		smooth: 'blendShift',
+		blend: 'blendShift',
+		blendshift: 'blendShift',
+		crop: 'fit',
+		fit: 'fit',
+		speed: 'speed',
+		fullscreenontap: 'fsOnTap',
+		fsontap: 'fsOnTap',
+		scenecheck: 'sceneCheckMin',
+		scenecheckmin: 'sceneCheckMin',
+		octsplitday: 'octSplitDay',
+		initdelay: 'initDelay',
+		focusx: 'focusX',
+		focusy: 'focusY',
+		uifps: 'uiFps',
+		watchdog: 'watchdog',
+		enabled: 'enabled',
+		debug: 'debug',
+		lock: 'lock'
+	}
+	var BOOLKEY = { enabled: 1, animate: 1, dirty: 1, blendShift: 1, watchdog: 1, fsOnTap: 1, debug: 1, lock: 1 }
+	var CFG = null
+
+	function parseConfig(src) {
+		var out = {}
+		var pairs = []
+		var i, k, v, L, c, n
+		if (typeof src === 'string') {
+			var lines = src.split(/[\r\n;&]+/)
+			for (i = 0; i < lines.length; i++) {
+				L = lines[i]
+				c = L.indexOf('#')
+				if (c >= 0) L = L.substring(0, c)
+				c = L.indexOf('//')
+				if (c >= 0) L = L.substring(0, c)
+				c = L.indexOf('=')
+				if (c < 0) continue
+				k = L.substring(0, c).replace(/^\s+|\s+$/g, '').toLowerCase()
+				v = L.substring(c + 1).replace(/^\s+|\s+$/g, '')
+				if (k && v !== '') pairs.push([k, v])
+			}
+		} else if (src && typeof src === 'object') {
+			for (k in src) {
+				if (Object.prototype.hasOwnProperty.call(src, k)) pairs.push([String(k).toLowerCase(), src[k]])
+			}
+		}
+		for (i = 0; i < pairs.length; i++) {
+			k = ALIAS[pairs[i][0]]
+			if (!k) continue
+			v = pairs[i][1]
+			if (BOOLKEY[k]) {
+				if (typeof v === 'boolean') out[k] = v
+				else {
+					v = String(v).toLowerCase()
+					out[k] = !(v === '0' || v === 'off' || v === 'false' || v === 'no' || v === 'нет')
+				}
+			} else if (k === 'preset' || k === 'fit') {
+				out[k] = String(v).toLowerCase()
+			} else {
+				n = parseFloat(v)
+				if (!isNaN(n)) out[k] = n
+			}
+		}
+		return out
+	}
+
+	function applyConfig(o) {
+		if (!o) return
+		if (o.preset && PRESETS[o.preset]) applyPreset(o.preset)
+		for (var i = 0; i < TUNABLE.length; i++) {
+			var k = TUNABLE[i]
+			if (k !== 'preset' && typeof o[k] !== 'undefined') Q[k] = o[k]
+		}
+		Q.fps = Math.max(1, Math.min(60, Math.round(Q.fps) || 15))
+		Q.scale = Math.max(1, Math.min(8, Math.round(Q.scale) || 2))
+	}
+
 	function loadPrefs() {
+		/* 1. lw/config.js - the file a human edits */
 		try {
-			var raw = window.localStorage && window.localStorage.getItem(STORE_KEY)
+			if (CFG === null) CFG = parseConfig(window.LW_CONFIG)
+			applyConfig(CFG)
+		} catch (e0) {
+			CFG = {}
+		}
+		/* 2. whatever was tuned with the on-device panel wins over the file,
+		 *    unless the file says  lock = 1 */
+		try {
+			var raw = CFG && CFG.lock ? null : window.localStorage && window.localStorage.getItem(STORE_KEY)
 			if (raw) {
 				var o = JSON.parse(raw)
 				if (o && o.preset && PRESETS[o.preset]) applyPreset(o.preset)
@@ -205,15 +333,20 @@
 					if (!isNaN(v)) Q[key] = Math.max(min, Math.min(max, v))
 				}
 			}
-			num(/[?&]lwfps=(\d+)/i, 'fps', 4, 60)
-			num(/[?&]lwscale=(\d+)/i, 'scale', 1, 4)
+			num(/[?&]lwfps=(\d+)/i, 'fps', 1, 60)
+			num(/[?&]lwscale=(\d+)/i, 'scale', 1, 8)
 			num(/[?&]lwtod=(\d+)/i, 'todStep', 1, 900)
 			num(/[?&]lwspeed=([\d.]+)/i, 'speed', 0.1, 4)
 			var mb = /[?&]lwblend=([01])/i.exec(s)
 			if (mb) Q.blendShift = mb[1] === '1'
 			var mf = /[?&]lwfit=(cover|contain|fill)/i.exec(s)
 			if (mf) Q.fit = mf[1].toLowerCase()
+			var md = /[?&]lwdirty=([01])/i.exec(s)
+			if (md) Q.dirty = md[1] === '1'
+			var ma = /[?&]lwanim=([01])/i.exec(s)
+			if (ma) Q.animate = ma[1] === '1'
 			if (/[?&]lwdebug=1/i.test(s)) Q.debug = true
+			if (/[?&]lwfs=1/i.test(s)) Q.fsOnTap = true
 		} catch (e2) {}
 	}
 
@@ -534,12 +667,40 @@
 		var q = 0
 		for (j = 0; j < n; j++) if (optColors[spx[j]]) optIdx[q++] = j
 
+		/* Bounding box of the animated pixels. Most scenes only animate a band
+		 * (water, sky, torches), so blitting just this box instead of the whole
+		 * backing store is the single cheapest win available on a slow device. */
+		var bx0 = sw
+		var by0 = sh
+		var bx1 = -1
+		var by1 = -1
+		for (q = 0; q < optIdx.length; q++) {
+			var bi = optIdx[q]
+			var iy = (bi / sw) | 0
+			var ix = bi - iy * sw
+			if (ix < bx0) bx0 = ix
+			if (ix > bx1) bx1 = ix
+			if (iy < by0) by0 = iy
+			if (iy > by1) by1 = iy
+		}
+		if (bx1 < 0) {
+			bx0 = 0
+			by0 = 0
+			bx1 = sw - 1
+			by1 = sh - 1
+		}
+
 		sc.spx = spx
 		sc.optIdx = optIdx
 		sc.scale = scale
 		sc.sw = sw
 		sc.sh = sh
+		sc.adx = bx0
+		sc.ady = by0
+		sc.adw = bx1 - bx0 + 1
+		sc.adh = by1 - by0 + 1
 		sc.animPct = n ? Math.round((count / n) * 1000) / 10 : 0
+		sc.boxPct = n ? Math.round(((sc.adw * sc.adh) / n) * 1000) / 10 : 0
 	}
 
 	/* =====================================================================
@@ -616,7 +777,13 @@
 			window.clearTimeout(timerId)
 			timerId = 0
 		}
-		var interval = 1000 / (Q.fps || 15)
+		/* While the quality panel is open the browser also has to composite
+		 * and scroll a DOM overlay on top of the canvas, which on a Galaxy Ace
+		 * costs more than the frame itself. Cap the renderer at Q.uiFps so the
+		 * panel stays scrollable, then go back to full speed on close. */
+		var fps = Q.fps || 15
+		if (panel && Q.uiFps && Q.uiFps < fps) fps = Q.uiFps
+		var interval = 1000 / fps
 		var delay = interval - (work || 0)
 		if (delay < 4) delay = 4
 		timerId = window.setTimeout(step, delay)
@@ -645,9 +812,24 @@
 			needFull = false
 		}
 
-		cyclePalette(S, t0 - startTick, Q.speed, Q.blendShift)
-		renderInto(S, imgData.data, full)
-		ctx.putImageData(imgData, 0, 0)
+		if (Q.animate === false) {
+			/* Light-only mode: between time-of-day steps nothing changes, so
+			 * there is nothing to compute and nothing to blit. Just idle. */
+			if (!full) {
+				timerId = window.setTimeout(step, 1000)
+				return
+			}
+			renderInto(S, imgData.data, true)
+			ctx.putImageData(imgData, 0, 0)
+		} else {
+			cyclePalette(S, t0 - startTick, Q.speed, Q.blendShift)
+			renderInto(S, imgData.data, full)
+			if (!full && Q.dirty && S.adw && S.adw * S.adh < S.sw * S.sh) {
+				ctx.putImageData(imgData, 0, 0, S.adx, S.ady, S.adw, S.adh)
+			} else {
+				ctx.putImageData(imgData, 0, 0)
+			}
+		}
 
 		var work = nowMs() - t0
 		stat.frames++
@@ -682,6 +864,22 @@
 	 * 8. Canvas plumbing
 	 * =================================================================== */
 
+	var fsBound = false
+
+	function onFsChange() {
+		/* The viewport changes size on the way in and on the way out, and old
+		 * Gecko reports the new size a beat late, so re-fit twice. */
+		window.setTimeout(fitCanvas, 60)
+		window.setTimeout(fitCanvas, 400)
+	}
+
+	function bindFsListeners() {
+		if (fsBound || !document.addEventListener) return
+		fsBound = true
+		var evs = ['fullscreenchange', 'mozfullscreenchange', 'webkitfullscreenchange', 'MSFullscreenChange']
+		for (var i = 0; i < evs.length; i++) document.addEventListener(evs[i], onFsChange, false)
+	}
+
 	function ensureCanvas() {
 		if (canvas) return true
 		canvas = document.getElementById('lw-canvas')
@@ -690,7 +888,14 @@
 			canvas = null
 			return false
 		}
-		ctx = canvas.getContext('2d')
+		/* alpha:false lets Gecko skip per-pixel compositing of the canvas
+		 * layer. Shipped in Firefox 30, harmlessly ignored elsewhere. */
+		try {
+			ctx = canvas.getContext('2d', { alpha: false })
+		} catch (e) {
+			ctx = null
+		}
+		if (!ctx) ctx = canvas.getContext('2d')
 		if (!ctx) {
 			canvas = null
 			return false
@@ -893,14 +1098,18 @@
 		var html = ''
 		html += '<div class="lw-h">Living Worlds</div>'
 		html += '<div class="lw-i">' + (S ? S.title : 'нет сцены') + '</div>'
-		html += '<div class="lw-i">' + (S ? S.sw + 'x' + S.sh + ' · аним ' + S.animPct + '%' : '') + ' · ' + Math.round(stat.avg) + ' мс/кадр</div>'
-		html += row('Профиль', 'p', ['off', 'ace', 'low', 'medium', 'high'], Q.preset)
-		html += row('FPS', 'f', [8, 10, 12, 15, 20, 25, 30], Q.fps)
-		html += row('Масштаб', 's', [1, 2, 3, 4], Q.scale)
+		html += '<div class="lw-i">' + (S ? S.sw + 'x' + S.sh + ' · аним ' + S.animPct + '% · бокс ' + S.boxPct + '%' : '') + ' · ' + Math.round(stat.avg) + ' мс/кадр</div>'
+		html += row('Профиль', 'p', PANEL_ORDER, Q.preset)
+		html += row('FPS', 'f', [4, 6, 8, 10, 15, 20, 30], Q.fps)
+		html += row('Масштаб', 's', [1, 2, 3, 4, 6, 8], Q.scale)
 		html += row('Сглаж.', 'b', [0, 1], Q.blendShift ? 1 : 0)
+		html += row('Блит', 'd', [0, 1], Q.dirty ? 1 : 0)
+		html += row('Анимация', 'a', [0, 1], Q.animate === false ? 0 : 1)
 		html += row('Шаг света, с', 't', [15, 30, 60, 120, 300], Q.todStep)
 		html += row('Кадр', 'c', ['cover', 'contain', 'fill'], Q.fit)
-		html += '<div class="lw-r"><button data-k="x" data-v="1" class="lw-b lw-close">Закрыть</button></div>'
+		html += '<div class="lw-r"><button data-k="z" data-v="1" class="lw-b">Во весь экран</button>'
+		html += '<button data-k="r" data-v="1" class="lw-b">Из конфига</button>'
+		html += '<button data-k="x" data-v="1" class="lw-b lw-close">Закрыть</button></div>'
 		d.innerHTML = html
 		document.body.appendChild(d)
 		panel = d
@@ -918,6 +1127,22 @@
 			if (k === 'b') LW.set({ blendShift: v === '1' })
 			if (k === 't') LW.set({ todStep: parseInt(v, 10) })
 			if (k === 'c') LW.set({ fit: v })
+			if (k === 'd') LW.set({ dirty: v === '1' })
+			if (k === 'a') LW.set({ animate: v === '1' })
+			if (k === 'r') {
+				/* Drop the on-device tuning, go back to lw/config.js. */
+				LW.resetPrefs()
+				closePanel()
+				openPanel()
+				return
+			}
+			if (k === 'z') {
+				/* This has to run inside the real tap handler: Gecko only grants
+				 * fullscreen from a genuine user gesture. */
+				LW.fullscreen()
+				closePanel()
+				return
+			}
 			closePanel()
 			openPanel()
 		}
@@ -928,7 +1153,8 @@
 		for (var i = 0; i < vals.length; i++) {
 			var v = vals[i]
 			var on = '' + v === '' + cur ? ' lw-on' : ''
-			var txt = v === 0 && key === 'b' ? 'off' : v === 1 && key === 'b' ? 'on' : v
+			var bool = key === 'b' || key === 'd' || key === 'a'
+			var txt = bool ? (v === 1 ? 'on' : 'off') : v
 			h += '<button class="lw-b' + on + '" data-k="' + key + '" data-v="' + v + '">' + txt + '</button>'
 		}
 		return h + '</div>'
@@ -967,6 +1193,21 @@
 		host.addEventListener('touchstart', start, false)
 		host.addEventListener('touchmove', move, false)
 		host.addEventListener('touchend', cancel, false)
+
+		/* Optional kiosk helper (?lwfs=1). Firefox for Android will only go
+		 * fullscreen from a user gesture, and it drops out of fullscreen on
+		 * every reload, so arm a single listener that fires on the first tap
+		 * anywhere and then removes itself. It never blocks the tap, so
+		 * device buttons and swipes keep working normally. */
+		if (Q.fsOnTap && document.addEventListener && document.removeEventListener) {
+			var once = function () {
+				document.removeEventListener('touchend', once, false)
+				document.removeEventListener('click', once, false)
+				LW.fullscreen()
+			}
+			document.addEventListener('touchend', once, false)
+			document.addEventListener('click', once, false)
+		}
 		host.addEventListener('touchcancel', cancel, false)
 		host.addEventListener('mousedown', start, false)
 		host.addEventListener('mousemove', move, false)
@@ -1176,10 +1417,146 @@
 			return LW
 		},
 
+		/* Forget everything tuned on the device and re-read lw/config.js.
+		 * Deliberately does NOT save, so the next reload reads the file too. */
+		resetPrefs: function () {
+			try {
+				if (window.localStorage) window.localStorage.removeItem(STORE_KEY)
+			} catch (e) {}
+			var oldScale = Q.scale
+			if (CFG && CFG.preset && PRESETS[CFG.preset]) applyPreset(CFG.preset)
+			else applyPreset('ace')
+			applyConfig(CFG)
+			stat.over = 0
+			if (Q.scale !== oldScale && S) {
+				stopLoop()
+				buildScaled(S, Q.scale)
+				resizeBackingStore()
+			}
+			fitCanvas()
+			needFull = true
+			startLoop()
+			return LW
+		},
 		ui: openPanel,
 		closeUi: closePanel,
 
 		/* Diagnostics / manual override, handy over adb or a desktop browser. */
+		/* ---- fullscreen -------------------------------------------------
+		 * Firefox for Android has no fullscreen button in its UI, but Gecko
+		 * has shipped the prefixed Fullscreen API since 9.0, so even 31.0 can
+		 * do it from a real tap. Every known spelling is tried in order and
+		 * the winning one is returned so the caller can report it. */
+		fullscreen: function (opts) {
+			opts = opts || {}
+			bindFsListeners()
+			var el = opts.element || document.documentElement || document.body
+			var names = [
+				'requestFullscreen',
+				'mozRequestFullScreen',
+				'webkitRequestFullscreen',
+				'webkitRequestFullScreen',
+				'msRequestFullscreen',
+			]
+			for (var i = 0; i < names.length; i++) {
+				if (el && typeof el[names[i]] === 'function') {
+					try {
+						el[names[i]]()
+						onFsChange()
+						return names[i]
+					} catch (e) {}
+				}
+			}
+			/* Last resort for browsers with no API at all: make the document
+			 * one screen taller and scroll by a pixel, which retracts the URL
+			 * bar. Opt-in, because it needs a page that is allowed to scroll. */
+			if (opts.scrollTrick) {
+				try {
+					document.documentElement.style.minHeight = ((window.innerHeight || 480) + 120) + 'px'
+					window.setTimeout(function () {
+						window.scrollTo(0, 1)
+						onFsChange()
+					}, 0)
+					return 'scrollTrick'
+				} catch (e2) {}
+			}
+			return null
+		},
+
+		exitFullscreen: function () {
+			var names = ['exitFullscreen', 'mozCancelFullScreen', 'webkitExitFullscreen', 'webkitCancelFullScreen', 'msExitFullscreen']
+			for (var i = 0; i < names.length; i++) {
+				if (typeof document[names[i]] === 'function') {
+					try {
+						document[names[i]]()
+						return names[i]
+					} catch (e) {}
+				}
+			}
+			return null
+		},
+
+		isFullscreen: function () {
+			return !!(
+				document.fullscreenElement ||
+				document.mozFullScreenElement ||
+				document.webkitFullscreenElement ||
+				document.msFullscreenElement ||
+				document.mozFullScreen ||
+				document.webkitIsFullScreen
+			)
+		},
+
+		/* ---- benchmark --------------------------------------------------
+		 * Times the real per-frame work (cycle + render + blit) for a list of
+		 * scales, synchronously, and reports the frame rate each one could
+		 * sustain. Restores the previous scale before returning. */
+		bench: function (opts) {
+			opts = opts || {}
+			if (!S || !ensureCanvas()) return null
+			var scales = opts.scales || [1, 2, 3, 4, 5, 6]
+			var iters = opts.iters || 16
+			var wasScale = S.scale
+			var out = []
+			var i, k, t0, ms, sc
+
+			for (i = 0; i < scales.length; i++) {
+				sc = scales[i]
+				if (sc < 1 || sc > 8) continue
+				buildScaled(S, sc)
+				resizeBackingStore()
+				if (!imgData) continue
+				setTodPalette(S, currentTimeOffset())
+				renderInto(S, imgData.data, true)
+				ctx.putImageData(imgData, 0, 0)
+
+				t0 = nowMs()
+				for (k = 0; k < iters; k++) {
+					cyclePalette(S, t0 - startTick + k * 40, Q.speed, Q.blendShift)
+					renderInto(S, imgData.data, false)
+					if (Q.dirty && S.adw && S.adw * S.adh < S.sw * S.sh) ctx.putImageData(imgData, 0, 0, S.adx, S.ady, S.adw, S.adh)
+					else ctx.putImageData(imgData, 0, 0)
+				}
+				ms = (nowMs() - t0) / iters
+
+				out.push({
+					scale: sc,
+					w: S.sw,
+					h: S.sh,
+					px: S.sw * S.sh,
+					ms: Math.round(ms * 100) / 100,
+					maxFps: ms > 0 ? Math.floor(1000 / ms) : 999,
+					animPct: S.animPct,
+					boxPct: S.boxPct,
+				})
+			}
+
+			buildScaled(S, wasScale)
+			resizeBackingStore()
+			needFull = true
+			return out
+		},
+
 		forceScene: function (idx) {
 			wantIdx = idx
 			switchTo(idx)
@@ -1197,6 +1574,9 @@
 				timeOffset: lastTod,
 				backing: S ? S.sw + 'x' + S.sh : null,
 				animPct: S ? S.animPct : null,
+				boxPct: S ? S.boxPct : null,
+				dirtyRect: S && S.adw ? S.adx + ',' + S.ady + ' ' + S.adw + 'x' + S.adh : null,
+				fullscreen: !!(document.fullscreenElement || document.mozFullScreenElement || document.webkitFullscreenElement || document.msFullscreenElement),
 				avgMs: Math.round(stat.avg * 10) / 10,
 				frames: stat.frames,
 				drops: stat.drops,
