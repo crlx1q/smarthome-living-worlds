@@ -1,0 +1,15 @@
+# Scene data is generated locally from the original Living Worlds ZIP.
+# 22 files x ~310 KB = ~6.8 MB of binary payload, intentionally not in git.
+lw/scenes/*.lwb
+lw/scenes/manifest.json
+
+# The original Living Worlds sources, used only by tools/convert-scenes.js
+vendor/
+
+# Installer backups
+*.bak
+
+node_modules/
+npm-debug.log*
+.DS_Store
+*.log
