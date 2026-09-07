@@ -186,13 +186,14 @@
 		octSplitDay: 16, // day-of-month boundary for early/late October
 		watchdog: true,
 		uiFps: 6, // fps cap while the quality panel is open, so it can scroll
-		fsOnTap: false, // ?lwfs=1 : the first tap anywhere requests fullscreen
+		fsOnTap: false, // ?lwfs=1 : tapping the hot spot below toggles fullscreen
+		fsTap: '#status-server', // fullscreen hot spot. 'screen' = anywhere on the page
 		debug: false,
 		base: 'lw/',
 	}
 
 	var STORE_KEY = 'lw.quality.v1'
-	var TUNABLE = 'enabled fps scale animate dirty blendShift todStep speed sceneCheckMin initDelay fit focusX focusY octSplitDay watchdog uiFps fsOnTap debug preset'.split(' ')
+	var TUNABLE = 'enabled fps scale animate dirty blendShift todStep speed sceneCheckMin initDelay fit focusX focusY octSplitDay watchdog uiFps fsOnTap fsTap debug preset'.split(' ')
 
 	function applyPreset(name) {
 		var p = PRESETS[name]
@@ -231,6 +232,9 @@
 		speed: 'speed',
 		fullscreenontap: 'fsOnTap',
 		fsontap: 'fsOnTap',
+		fstap: 'fsTap',
+		fsbutton: 'fsTap',
+		fullscreenbutton: 'fsTap',
 		scenecheck: 'sceneCheckMin',
 		scenecheckmin: 'sceneCheckMin',
 		octsplitday: 'octSplitDay',
@@ -277,8 +281,11 @@
 				if (typeof v === 'boolean') out[k] = v
 				else {
 					v = String(v).toLowerCase()
-					out[k] = !(v === '0' || v === 'off' || v === 'false' || v === 'no' || v === 'нет')
+					out[k] = !(v === '0' || v === 'off' || v === 'false' || v === 'no' || v === '\u043d\u0435\u0442')
 				}
+			} else if (k === 'fsTap') {
+				/* A CSS selector, so keep the original letter case. */
+				out[k] = String(v)
 			} else if (k === 'preset' || k === 'fit') {
 				out[k] = String(v).toLowerCase()
 			} else {
@@ -864,6 +871,69 @@
 	 * 8. Canvas plumbing
 	 * =================================================================== */
 
+	/* ---- fullscreen hot spot -----------------------------------------
+	 * Firefox for Android has no fullscreen button of its own, it only
+	 * grants fullscreen from a real user gesture, and it leaves fullscreen
+	 * on every reload, so the page needs a permanent button of its own.
+	 * A one-shot listener on `document` does not work on the phone: the
+	 * SmartHome swipe handler already owns document-level touchend, and
+	 * Android Firefox does not reliably synthesise a `click` after a tap -
+	 * which is why the first version only ever fired under a desktop mouse.
+	 * So bind straight to one small element (by default the online status
+	 * chip) and listen for touchend *and* click, every single time. */
+	var fsTapEl = null
+	var fsTapAt = 0
+	var fsTapRetry = false
+
+	function toggleFullscreen() {
+		if (LW.isFullscreen()) return LW.exitFullscreen()
+		return LW.fullscreen({ scrollTrick: true })
+	}
+
+	function fsTapHandler(ev) {
+		/* One tap can deliver touchend and then click; take the first. */
+		var t = nowMs()
+		if (t - fsTapAt < 700) return
+		fsTapAt = t
+		toggleFullscreen()
+		if (ev && ev.stopPropagation) ev.stopPropagation()
+	}
+
+	function bindFsTap() {
+		if (!Q.fsOnTap || !document.addEventListener) return
+		var sel = Q.fsTap || '#status-server'
+		var el = null
+		if (sel === 'screen' || sel === 'all' || sel === '*') el = document
+		else {
+			if (sel.charAt(0) === '#' && document.getElementById) el = document.getElementById(sel.substring(1))
+			if (!el && document.querySelector) {
+				try {
+					el = document.querySelector(sel)
+				} catch (eSel) {
+					el = null
+				}
+			}
+		}
+		if (!el) {
+			/* The element may simply not be parsed yet; try once more. */
+			log('[LW] fullscreen hot spot not found: ' + sel)
+			if (!fsTapRetry && window.setTimeout) {
+				fsTapRetry = true
+				window.setTimeout(bindFsTap, 2000)
+			}
+			return
+		}
+		if (el === fsTapEl) return
+		if (fsTapEl && fsTapEl.removeEventListener) {
+			fsTapEl.removeEventListener('touchend', fsTapHandler, false)
+			fsTapEl.removeEventListener('click', fsTapHandler, false)
+		}
+		fsTapEl = el
+		el.addEventListener('touchend', fsTapHandler, false)
+		el.addEventListener('click', fsTapHandler, false)
+		log('[LW] fullscreen hot spot: ' + sel)
+	}
+
 	var fsBound = false
 
 	function onFsChange() {
@@ -1138,8 +1208,9 @@
 			}
 			if (k === 'z') {
 				/* This has to run inside the real tap handler: Gecko only grants
-				 * fullscreen from a genuine user gesture. */
-				LW.fullscreen()
+				 * fullscreen from a genuine user gesture. A second press leaves
+				 * fullscreen again, since the phone shows no exit UI. */
+				toggleFullscreen()
 				closePanel()
 				return
 			}
@@ -1194,20 +1265,8 @@
 		host.addEventListener('touchmove', move, false)
 		host.addEventListener('touchend', cancel, false)
 
-		/* Optional kiosk helper (?lwfs=1). Firefox for Android will only go
-		 * fullscreen from a user gesture, and it drops out of fullscreen on
-		 * every reload, so arm a single listener that fires on the first tap
-		 * anywhere and then removes itself. It never blocks the tap, so
-		 * device buttons and swipes keep working normally. */
-		if (Q.fsOnTap && document.addEventListener && document.removeEventListener) {
-			var once = function () {
-				document.removeEventListener('touchend', once, false)
-				document.removeEventListener('click', once, false)
-				LW.fullscreen()
-			}
-			document.addEventListener('touchend', once, false)
-			document.addEventListener('click', once, false)
-		}
+		/* Kiosk helper (fullscreenOnTap): wire up the fullscreen hot spot. */
+		bindFsTap()
 		host.addEventListener('touchcancel', cancel, false)
 		host.addEventListener('mousedown', start, false)
 		host.addEventListener('mousemove', move, false)
@@ -1481,6 +1540,25 @@
 				} catch (e2) {}
 			}
 			return null
+		},
+
+		/* Enter fullscreen, or leave it if already there. Safe to call from
+		 * any tap handler, which is what the status chip does. */
+		toggleFullscreen: function () {
+			return toggleFullscreen()
+		},
+
+		/* Move the fullscreen hot spot at runtime, e.g. LW.fsTap('#clock-time')
+		 * or LW.fsTap('screen') for the whole page. */
+		fsTap: function (sel) {
+			if (typeof sel === 'string' && sel) {
+				Q.fsTap = sel
+				Q.fsOnTap = true
+				fsTapRetry = false
+				savePrefs()
+			}
+			bindFsTap()
+			return fsTapEl ? Q.fsTap : null
 		},
 
 		exitFullscreen: function () {
